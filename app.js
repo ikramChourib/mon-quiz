@@ -1,15 +1,16 @@
 (function(){
   "use strict";
 
-  var QUESTIONS = window.QUIZ_QUESTIONS || [];
   var CFG = window.QUIZ_CONFIG || {};
-  var POINTS_PER_Q = CFG.pointsParQuestion || 0.25;
-  var TOTAL_POINTS = QUESTIONS.length * POINTS_PER_Q;
-  var MINUTES = CFG.dureeMinutes || 10;
   var SCRIPT_URL = CFG.googleScriptUrl || "";
 
   var app = document.getElementById("app");
-  document.getElementById("moduleName").textContent = CFG.moduleName || "Quiz";
+
+  var QUESTIONS = [];
+  var MODULE_NAME = "Quiz";
+  var MINUTES = 10;
+  var POINTS_PER_Q = 0.25;
+  var TOTAL_POINTS = 0;
 
   var reg = null;
   var answers = {};
@@ -24,7 +25,7 @@
   }
 
   function storageKey(id){
-    return "quizDone_" + (CFG.moduleName || "quiz") + "_" + id;
+    return "quizDone_" + MODULE_NAME + "_" + id;
   }
 
   function fmtTime(sec){
@@ -34,11 +35,61 @@
     return (m < 10 ? "0" + m : "" + m) + ":" + (s < 10 ? "0" + s : "" + s);
   }
 
+  function renderLoading(msg){
+    app.innerHTML = '<div class="center-msg">' + esc(msg || "Chargement…") + '</div>';
+  }
+
+  function renderConfigError(){
+    app.innerHTML = '<div class="register-wrap"><div class="card register-card">' +
+      '<h1>Configuration manquante</h1>' +
+      '<p class="lead">L\'URL du script Google (dans config.js) n\'est pas renseignée. Contacte l\'enseignant.</p>' +
+    '</div></div>';
+  }
+
+  function renderLoadError(){
+    app.innerHTML = '<div class="register-wrap"><div class="card register-card">' +
+      '<h1>Impossible de charger le quiz</h1>' +
+      '<p class="lead">La connexion au serveur a échoué. Vérifie ta connexion internet et recharge la page. Si le problème persiste, préviens l\'enseignant.</p>' +
+      '<button class="btn btn-primary" id="retryBtn" style="width:100%;">Réessayer</button>' +
+    '</div></div>';
+    var b = document.getElementById("retryBtn");
+    if (b) b.addEventListener("click", loadAndStart);
+  }
+
+  function loadAndStart(){
+    renderLoading();
+    if (!SCRIPT_URL || SCRIPT_URL.indexOf("http") !== 0){
+      renderConfigError();
+      return;
+    }
+    fetch(SCRIPT_URL + "?action=questions", {method:"GET"})
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        if (!data || !data.questions){ renderLoadError(); return; }
+        QUESTIONS = data.questions || [];
+        var cfg = data.config || {};
+        MODULE_NAME = cfg.moduleName || "Quiz";
+        MINUTES = Number(cfg.dureeMinutes) || 10;
+        POINTS_PER_Q = Number(cfg.pointsParQuestion) || 0.25;
+        TOTAL_POINTS = Math.round(QUESTIONS.length * POINTS_PER_Q * 100) / 100;
+        document.getElementById("moduleName").textContent = MODULE_NAME;
+        if (!QUESTIONS.length){
+          app.innerHTML = '<div class="register-wrap"><div class="card register-card">' +
+            '<h1>Aucune question configurée</h1>' +
+            '<p class="lead">L\'enseignant n\'a pas encore ajouté de questions pour ce module.</p>' +
+          '</div></div>';
+          return;
+        }
+        renderRegister();
+      })
+      .catch(renderLoadError);
+  }
+
   function renderRegister(opts){
     opts = opts || {};
     app.innerHTML =
       '<div class="register-wrap"><div class="card register-card">' +
-        '<h1>Quiz — ' + esc(CFG.moduleName || "") + '</h1>' +
+        '<h1>Quiz — ' + esc(MODULE_NAME) + '</h1>' +
         '<p class="lead">' + QUESTIONS.length + ' questions · ' + MINUTES + ' minutes · ' + POINTS_PER_Q.toFixed(2).replace(".",",") + ' pt par bonne réponse (note sur ' + TOTAL_POINTS.toFixed(2).replace(".",",") + ')</p>' +
         (opts.error ? '<div class="error-box">' + esc(opts.error) + '</div>' : '') +
         '<form id="regForm">' +
@@ -121,7 +172,7 @@
   function renderQuiz(){
     var letters = ["A","B","C","D"];
     var qHtml = QUESTIONS.map(function(item, idx){
-      var optsHtml = letters.filter(function(l){ return item.opts[l] != null; }).map(function(l){
+      var optsHtml = letters.filter(function(l){ return item.opts && item.opts[l] != null && item.opts[l] !== ""; }).map(function(l){
         return '<label class="opt">' +
           '<input type="radio" name="q' + idx + '" value="' + l + '">' +
           '<span class="optletter">' + l + '</span><span>' + esc(item.opts[l]) + '</span>' +
@@ -162,16 +213,14 @@
     var btn = document.getElementById("submitBtn");
     if (btn){ btn.disabled = true; btn.textContent = "Envoi…"; }
 
-    var score = 0;
-    QUESTIONS.forEach(function(item, idx){
-      if (answers[idx] && answers[idx] === item.correct){ score += POINTS_PER_Q; }
-    });
-    score = Math.round(score * 100) / 100;
-
+    // La note n'est PAS calculée ici : seules les réponses brutes (A/B/C/D)
+    // sont envoyées. Le script Google compare côté serveur à la clé de
+    // correction stockée dans le Sheet — jamais visible du navigateur.
     var payload = {
-      module: CFG.moduleName || "",
+      action: "submit",
+      module: MODULE_NAME,
       nom: reg.nom, prenom: reg.prenom, classe: reg.classe, identifiant: reg.identifiant,
-      score: score, total: TOTAL_POINTS, auto: !!auto,
+      auto: !!auto,
       reponses: answers,
       horodatage: new Date().toISOString()
     };
@@ -180,18 +229,12 @@
 
     var finish = function(){ submitting = false; renderDone(); };
 
-    if (SCRIPT_URL && SCRIPT_URL.indexOf("http") === 0){
-      fetch(SCRIPT_URL, {
-        method: "POST",
-        mode: "no-cors", // Apps Script ne renvoie pas d'en-têtes CORS lisibles ; on suppose l'envoi réussi
-        headers: {"Content-Type": "text/plain;charset=utf-8"},
-        body: JSON.stringify(payload)
-      }).then(finish).catch(finish);
-    } else {
-      // Pas d'URL configurée : on affiche quand même le message de fin,
-      // mais rien n'est envoyé nulle part tant que config.js n'est pas renseigné.
-      finish();
-    }
+    fetch(SCRIPT_URL, {
+      method: "POST",
+      mode: "no-cors", // réponse illisible depuis un autre domaine ; on considère l'envoi réussi
+      headers: {"Content-Type": "text/plain;charset=utf-8"},
+      body: JSON.stringify(payload)
+    }).then(finish).catch(finish);
   }
 
   function renderDone(){
@@ -203,5 +246,5 @@
       '</div></div>';
   }
 
-  renderRegister();
+  loadAndStart();
 })();
